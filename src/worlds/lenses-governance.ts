@@ -397,6 +397,12 @@ const KERNEL: KernelConfig = {
         reason: 'Output repeats the ambient context injection verbatim. The lens should use ambient context, not echo it.',
         action: 'WARN',
       },
+      {
+        id: 'output-signal-detection',
+        pattern: '(deception\\s+(detected|probability|score|likelihood)|inconsistency\\s+detected|deflection\\s+detected|signal[s]?\\s*:\\s*\\d|confidence\\s*:\\s*\\d)',
+        reason: 'Output contains behavioral signal detection. Lenses is a perspective companion, not a signal detector. Invariant: perspective_only, no_signal_detection.',
+        action: 'BLOCK',
+      },
     ],
   },
 

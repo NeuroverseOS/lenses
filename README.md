@@ -344,6 +344,8 @@ These are structural, immutable, and cannot be disabled:
 
 | Invariant | Guarantee |
 |-----------|-----------|
+| `perspective_only` | **Every response reframes through philosophy. Never detects or classifies behavioral signals.** |
+| `no_signal_detection` | **No deception analysis, no confidence scores, no signal labels. Lenses sees through a lens, not a microscope.** |
 | `byo_key_integrity` | Your API key is never logged, transmitted, or shared |
 | `no_hidden_data_flow` | Every data send corresponds to a user action |
 | `user_controls_activation` | No listening without explicit activation |
