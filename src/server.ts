@@ -80,17 +80,28 @@ const FOLLOW_UP_WINDOW_MS = 30_000;
 /** Recency threshold: ambient entries newer than this get 3x weight */
 const RECENCY_BOOST_SECONDS = 15;
 
-/** Auto-scaled word limits based on situation */
+/** Auto-scaled word limits based on situation — glasses max ~50 words */
 const WORDS_GLANCE = 15;   // In active conversation — must be readable at a glance
-const WORDS_EXPAND = 40;   // Double-tap expand — same thought, room to breathe
-const WORDS_FOLLOWUP = 60; // Continuing a thread — more than a glance, less than a monologue
-const WORDS_DEPTH = 80;    // Alone, reflecting — room for real insight
+const WORDS_EXPAND = 30;   // Double-tap expand — same thought, room to breathe
+const WORDS_FOLLOWUP = 35; // Continuing a thread — more than a glance, less than a monologue
+const WORDS_DEPTH = 50;    // Alone, reflecting — room for real insight, still glasses-safe
 
 /** Pattern to detect "lens" trigger in speech — just one syllable */
 const LENS_TRIGGER_PATTERN = /\b(?:lens\s*(?:me)?|give\s+me\s+a\s+lens)\b/i;
 
 /** Pattern to detect one-shot voice preview: "lens this as coach" */
 const PREVIEW_VOICE_PATTERN = /\b(?:lens\s+(?:this\s+)?as|as\s+(?:a\s+)?)\s+(\w+)\b/i;
+
+/** Pattern to detect help/tutorial request: "show me commands", "how does this work", "help" */
+const HELP_PATTERN = /\b(?:show\s+(?:me\s+)?commands|how\s+(?:does|do)\s+(?:this|you)\s+work|help|what\s+can\s+(?:you|I)\s+do)\b/i;
+
+/** Tutorial steps shown through the lens display — AI teaches you the app */
+const TUTORIAL_STEPS = [
+  'Tap: get a perspective. Tap again within 30s: go deeper.',
+  'Hold temple: dismiss — "that didn\'t land." I\'ll try different next time.',
+  'Say "lens this as Coach" to preview a different voice without switching.',
+  'Switch your voice anytime in Settings on your phone.',
+];
 
 /** Maximum days of journal history kept on phone */
 const JOURNAL_MAX_DAYS = 7;
@@ -533,7 +544,10 @@ async function saveJournal(session: AppSession, journal: LensJournal): Promise<v
   } catch (err) {
     console.warn('[Lenses] Failed to persist journal:', err instanceof Error ? err.message : err);
   }
-  const summary = `${journal.totalSignals} signals | ${journal.currentStreakDays}d streak`;
+  const followRate = journal.totalSignals > 0
+    ? Math.round((journal.totalFollowThroughs / journal.totalSignals) * 100)
+    : 0;
+  const summary = `${journal.totalSignals} perspectives · ${followRate}% led to action`;
   session.dashboard.content.writeToMain(summary);
 }
 
@@ -599,37 +613,51 @@ function resolveSignal(s: LensSession, action: NextAction): void {
  * Update the dashboard with live session metrics.
  * Lets the user check their streak, call count, and voice mid-session.
  */
+/** Estimated cost per AI call at Haiku rates (input + output tokens) */
+const ESTIMATED_COST_PER_CALL = 0.001;
+
+/**
+ * Human-readable mode names for the dashboard.
+ * Users don't know what "direct" or "translate" means in isolation.
+ */
+const MODE_LABELS: Record<string, string> = {
+  direct: 'clear advice',
+  translate: 'reframes',
+  reflect: 'questions',
+  challenge: 'pushback',
+  teach: 'lessons',
+};
+
 function updateDashboardMetrics(s: LensSession): void {
   const duration = Math.round((Date.now() - s.metrics.sessionStart) / 60000);
+  const estimatedCost = (s.metrics.aiCalls * ESTIMATED_COST_PER_CALL).toFixed(3);
 
-  // Line 1: Session status
+  // Line 1: Voice + calls + estimated cost + duration
   const statusParts: string[] = [
     `${s.voice.name}`,
-    `${s.metrics.aiCalls} calls`,
+    `${s.metrics.aiCalls} calls (~$${estimatedCost})`,
   ];
-  if (s.metrics.ambientSends > 0) statusParts.push(`${s.metrics.ambientSends} ambient`);
-  if (s.metrics.proactiveInsights > 0) statusParts.push(`${s.metrics.proactiveInsights} proactive`);
-  if (s.journal.currentStreakDays > 1) statusParts.push(`${s.journal.currentStreakDays}d streak`);
   if (duration > 0) statusParts.push(`${duration}m`);
 
-  // Line 2: Behavioral insight (if enough data)
-  // Show the user which modes actually change their behavior.
-  // "You respond best to challenge (80%) · reflect (65%)"
+  // Line 2: Behavioral insight — what's working for you
   const insightLine = buildBehaviorInsight(s.journal);
 
+  // Line 3: Governance hint (only when trust is below ACTIVE)
+  const govHint = s.governance.gate !== 'ACTIVE'
+    ? '\nAdjusting — try fewer, slower taps.'
+    : '';
+
   const display = insightLine
-    ? `${statusParts.join(' · ')}\n${insightLine}`
-    : statusParts.join(' · ');
+    ? `${statusParts.join(' · ')}\n${insightLine}${govHint}`
+    : `${statusParts.join(' · ')}${govHint}`;
 
   s.appSession.dashboard.content.writeToMain(display);
 }
 
 /**
  * Build a user-visible behavior insight from the journal.
- * Shows which modes the user responds to best.
- *
- * This replaces silent optimization: the user SEES their pattern
- * and decides what to do with it. Transparent, not hidden.
+ * Uses human-readable mode labels instead of internal names.
+ * Shows which approaches actually change the user's behavior.
  *
  * Only shows after 5+ signals — need enough data to be meaningful.
  */
@@ -644,20 +672,21 @@ function buildBehaviorInsight(journal: LensJournal): string {
     .filter(([_, data]) => data.surfaced >= 3)
     .map(([mode, data]) => ({
       mode,
+      label: MODE_LABELS[mode] ?? mode,
       rate: Math.round((data.acted / data.surfaced) * 100),
     }))
     .sort((a, b) => b.rate - a.rate);
 
   if (modeEntries.length === 0) {
-    return `${followRate}% acted on`;
+    return `${followRate}% of insights led to action`;
   }
 
-  // Show top 2 modes
+  // Show top 2 modes with human-readable labels
   const topModes = modeEntries.slice(0, 2)
-    .map(m => `${m.mode} (${m.rate}%)`)
+    .map(m => `${m.label} (${m.rate}%)`)
     .join(' · ');
 
-  return `${followRate}% acted on · best: ${topModes}`;
+  return `${followRate}% led to action · you respond best to: ${topModes}`;
 }
 
 /**
@@ -983,6 +1012,21 @@ class LensesApp extends AppServer {
       if (s.ambientBuffer.enabled && s.ambientBuffer.bystanderAcknowledged) {
         s.ambientBuffer.entries.push({ text: userText, timestamp: Date.now() });
         purgeExpiredAmbient(s.ambientBuffer);
+      }
+
+      // ── Tutorial: "show me commands" / "help" ─────────────────────────
+      // The app teaches you how to use it — always through the AI, on the glasses.
+      if (HELP_PATTERN.test(userText)) {
+        const displayCheck = s.executor.evaluate('display_response', s.appContext);
+        if (displayCheck.allowed) {
+          // Show tutorial steps one at a time — each tap advances
+          const step = s.metrics.activations % TUTORIAL_STEPS.length;
+          session.layouts.showDoubleTextWall(
+            `${s.voice.name} · commands`,
+            TUTORIAL_STEPS[step],
+          );
+        }
+        return;
       }
 
       // ── One-shot voice preview: "lens this as coach" ──────────────────
