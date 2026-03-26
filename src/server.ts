@@ -333,24 +333,33 @@ const EMPTY_JOURNAL: LensJournal = {
  * Load the lens journal from the user's phone settings.
  * Returns EMPTY_JOURNAL if none exists.
  */
-function loadJournal(settings: Record<string, unknown> | null): LensJournal {
-  const raw = settings?.lens_journal as LensJournal | undefined;
-  if (!raw) return { ...EMPTY_JOURNAL };
-  return raw;
+/**
+ * Load the lens journal from SimpleStorage.
+ * SimpleStorage is a cloud-backed key-value store that persists across sessions.
+ * RAM → debounced sync → MongoDB. 100KB per value, 1MB total per app/user.
+ * The journal is tiny (~200 bytes of aggregate counts) — well within limits.
+ */
+async function loadJournal(session: AppSession): Promise<LensJournal> {
+  try {
+    const raw = await session.storage.get('lens_journal');
+    if (raw && typeof raw === 'object') return raw as unknown as LensJournal;
+  } catch {
+    // First session or storage unavailable — start fresh
+  }
+  return { ...EMPTY_JOURNAL };
 }
 
 /**
- * Write journal summary to the dashboard.
- *
- * SDK limitation: SettingsManager is read-only from the app side.
- * Settings are defined in app_config.json and managed by MentraOS Cloud.
- * We can't persist the journal to settings — instead we display a
- * session summary on the dashboard when the session ends.
- *
- * For true cross-session persistence, we'd need a webview backend.
- * For now, the journal lives in RAM and the dashboard shows the summary.
+ * Save the lens journal to SimpleStorage and update the dashboard.
+ * Governance: phone_local_journal_only — only aggregate counts, no content.
+ * SimpleStorage syncs to MentraOS Cloud (user's account), not NeuroverseOS servers.
  */
-function writeJournalToDashboard(session: AppSession, journal: LensJournal): void {
+async function saveJournal(session: AppSession, journal: LensJournal): Promise<void> {
+  try {
+    await session.storage.set('lens_journal', journal as unknown as Record<string, unknown>);
+  } catch (err) {
+    console.warn('[Lenses] Failed to persist journal:', err instanceof Error ? err.message : err);
+  }
   const summary = `${journal.totalLenses} lenses | ${journal.currentStreakDays}d streak`;
   session.dashboard.content.writeToMain(summary);
 }
@@ -535,7 +544,7 @@ class LensesApp extends AppServer {
 
     // ── Load journal from phone ────────────────────────────────────────────
 
-    const journal = loadJournal(session.settings as unknown as Record<string, unknown> | null);
+    const journal = await loadJournal(session);
     // Proactive defaults to OFF — user must explicitly opt in (governance: proactive_opt_in)
     const proactiveFreq = session.settings.get<string>('proactive_frequency', 'off') as ProactiveFrequency;
 
@@ -1228,7 +1237,7 @@ class LensesApp extends AppServer {
           s.journal.recentDays = s.journal.recentDays.slice(-JOURNAL_MAX_DAYS);
         }
 
-        writeJournalToDashboard(s.appSession, s.journal);
+        await saveJournal(s.appSession, s.journal);
       }
 
       const duration = Math.round((Date.now() - s.metrics.sessionStart) / 1000);
