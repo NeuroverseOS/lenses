@@ -38,8 +38,9 @@ import {
   DEFAULT_USER_RULES,
   parseWorldMarkdown,
   emitWorldDefinition,
+  simulateWorld,
 } from '@neuroverseos/governance';
-import type { AppContext, UserRules } from '@neuroverseos/governance';
+import type { AppContext, UserRules, WorldDefinition } from '@neuroverseos/governance';
 
 import {
   VOICES,
@@ -151,6 +152,94 @@ function extractModeTag(text: string): { mode: ResponseMode | 'unknown'; cleanTe
     return { mode, cleanText: text.replace(MODE_TAG_PATTERN, '').trim() };
   }
   return { mode: 'unknown', cleanText: text.trim() };
+}
+
+// ─── Governance State Bridge ─────────────────────────────────────────────────
+// Feeds app metrics into the governance engine's simulateWorld() function.
+// Rules fire. Trust decays or recovers. Gates determine app behavior.
+// The user never sees any of this — the app just reads the room.
+
+type GovernanceGate = 'ACTIVE' | 'DEGRADED' | 'SUSPENDED' | 'REVOKED';
+
+interface GovernanceState {
+  sessionTrust: number;
+  gate: GovernanceGate;
+}
+
+/**
+ * Evaluate governance rules against current session metrics.
+ * Returns updated trust score and current gate.
+ *
+ * This is the missing bridge: metrics → simulateWorld() → trust → gate.
+ * The worldfile rules define the math. This function connects it.
+ */
+function evaluateGovernanceState(
+  world: WorldDefinition | null,
+  metrics: LensSession['metrics'],
+  currentTrust: number,
+  ambientEnabled: boolean,
+  bystanderAck: boolean,
+): GovernanceState {
+  if (!world) return { sessionTrust: currentTrust, gate: classifyGate(currentTrust) };
+
+  try {
+    const result = simulateWorld(world, {
+      stateOverrides: {
+        session_trust: currentTrust,
+        ai_calls_made: metrics.aiCalls,
+        ai_calls_failed: metrics.aiFailures,
+        activation_count: metrics.activations,
+        lens_switches: metrics.voiceSwitches,
+        ambient_sends: metrics.ambientSends,
+        ambient_enabled: ambientEnabled ? 1 : 0,
+        ambient_bystander_ack: bystanderAck ? 1 : 0,
+        governance_blocks: 0,
+      },
+    });
+
+    const newTrust = typeof result.finalState?.session_trust === 'number'
+      ? Math.max(0, Math.min(100, result.finalState.session_trust))
+      : currentTrust;
+
+    return { sessionTrust: newTrust, gate: classifyGate(newTrust) };
+  } catch {
+    // If simulation fails, maintain current state — don't crash the app
+    return { sessionTrust: currentTrust, gate: classifyGate(currentTrust) };
+  }
+}
+
+function classifyGate(trust: number): GovernanceGate {
+  if (trust >= 70) return 'ACTIVE';
+  if (trust >= 30) return 'DEGRADED';
+  if (trust > 10) return 'SUSPENDED';
+  return 'REVOKED';
+}
+
+/**
+ * Apply gate-based behavioral adjustments.
+ * The user never sees gates. They feel the app adjust.
+ *
+ * ACTIVE:    Full functionality. Everything works.
+ * DEGRADED:  Responses shorter (60%). Proactive slower. App feels careful.
+ * SUSPENDED: Proactive off. On-demand minimal. App feels quiet.
+ * REVOKED:   All AI blocked. Session needs restart.
+ */
+function gateAdjustments(gate: GovernanceGate): {
+  wordMultiplier: number;
+  proactiveMultiplier: number;
+  classifyDelayMultiplier: number;
+  blockAI: boolean;
+} {
+  switch (gate) {
+    case 'ACTIVE':
+      return { wordMultiplier: 1.0, proactiveMultiplier: 1.0, classifyDelayMultiplier: 1.0, blockAI: false };
+    case 'DEGRADED':
+      return { wordMultiplier: 0.6, proactiveMultiplier: 0.5, classifyDelayMultiplier: 2.0, blockAI: false };
+    case 'SUSPENDED':
+      return { wordMultiplier: 0.4, proactiveMultiplier: 0, classifyDelayMultiplier: Infinity, blockAI: false };
+    case 'REVOKED':
+      return { wordMultiplier: 0, proactiveMultiplier: 0, classifyDelayMultiplier: Infinity, blockAI: true };
+  }
 }
 
 const AI_MODELS: Record<string, { provider: 'openai' | 'anthropic'; model: string }> = {
@@ -418,10 +507,6 @@ const EMPTY_JOURNAL: LensJournal = {
 };
 
 /**
- * Load the lens journal from the user's phone settings.
- * Returns EMPTY_JOURNAL if none exists.
- */
-/**
  * Load the lens journal from SimpleStorage.
  * SimpleStorage is a cloud-backed key-value store that persists across sessions.
  * RAM → debounced sync → MongoDB. 100KB per value, 1MB total per app/user.
@@ -664,6 +749,10 @@ interface LensSession {
   lastWasProactive: boolean;
   /** Pending signal: created when AI responds, resolved when user takes next action */
   pendingSignal: SignalRecord | null;
+  /** Governance state — trust score and current gate */
+  governance: GovernanceState;
+  /** The loaded app world for simulateWorld() calls */
+  appWorldDef: WorldDefinition | null;
   /** MentraOS session handle for saving journal */
   appSession: AppSession;
   /** Lens journal loaded from phone */
@@ -797,6 +886,8 @@ class LensesApp extends AppServer {
       lastMode: 'unknown',
       lastWasProactive: false,
       pendingSignal: null,
+      governance: { sessionTrust: 100, gate: 'ACTIVE' },
+      appWorldDef: this.appWorld,
       appSession: session,
       journal,
       proactive: new ProactiveEngine(proactiveFreq),
@@ -952,13 +1043,18 @@ class LensesApp extends AppServer {
         s.proactive.addUtterance(userText);
 
         // Reset the classify timer — wait for a pause in speech
+        // Gate adjustments: DEGRADED = 2x slower, SUSPENDED/REVOKED = no classify
         if (s.classifyTimer) clearTimeout(s.classifyTimer);
 
+        const proactiveAdj = gateAdjustments(s.governance.gate);
         const wordCount = userText.split(/\s+/).length;
-        if (wordCount >= MIN_CLASSIFY_WORDS) {
+        if (wordCount >= MIN_CLASSIFY_WORDS && proactiveAdj.proactiveMultiplier > 0) {
+          const delay = Math.round(UTTERANCE_CLASSIFY_DELAY_MS * proactiveAdj.classifyDelayMultiplier);
           s.classifyTimer = setTimeout(() => {
+            // Guard: session may have been cleaned up during the delay
+            if (!sessions.has(sessionId)) return;
             this.proactiveClassify(s, session, sessionId);
-          }, UTTERANCE_CLASSIFY_DELAY_MS);
+          }, delay);
         }
       }
 
@@ -1396,8 +1492,14 @@ class LensesApp extends AppServer {
     s.metrics.aiCalls++;
 
     try {
-      // maxWords is baked into the system prompt (auto-scaled per interaction)
-      const currentMaxWords = hasRecentAmbient(s.ambientBuffer) ? WORDS_GLANCE : WORDS_DEPTH;
+      // maxWords is auto-scaled per interaction AND adjusted by governance gate
+      const adjustments = gateAdjustments(s.governance.gate);
+      if (adjustments.blockAI) {
+        session.layouts.showTextWall('Session needs a restart.');
+        return;
+      }
+      const baseMaxWords = hasRecentAmbient(s.ambientBuffer) ? WORDS_GLANCE : WORDS_DEPTH;
+      const currentMaxWords = Math.max(5, Math.round(baseMaxWords * adjustments.wordMultiplier));
       const response = await callUserAI(s.aiProvider, s.systemPrompt, messages, userText, currentMaxWords);
 
       if (response.text) {
@@ -1445,6 +1547,15 @@ class LensesApp extends AppServer {
 
         // UX: Update dashboard with mid-session metrics so user can check anytime
         updateDashboardMetrics(s);
+
+        // ── Governance: re-evaluate trust after every AI call ────────────
+        s.governance = evaluateGovernanceState(
+          s.appWorldDef,
+          s.metrics,
+          s.governance.sessionTrust,
+          s.ambientBuffer.enabled,
+          s.ambientBuffer.bystanderAcknowledged,
+        );
       }
     } catch (err) {
       s.metrics.aiFailures++;

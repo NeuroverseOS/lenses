@@ -26,9 +26,10 @@
     },
     {
       "key": "ai_api_key",
-      "type": "text",
+      "type": "secret",
       "label": "API Key",
-      "defaultValue": ""
+      "defaultValue": "",
+      "description": "Your API key for Claude or GPT. Your key, your cost, your data. We never store or see it."
     },
     {
       "key": "ai_provider",
@@ -67,7 +68,8 @@
         { "label": "Medium — Selective, clear moments", "value": "medium" },
         { "label": "High — Surface perspectives often", "value": "high" }
       ],
-      "defaultValue": "off"
+      "defaultValue": "off",
+      "description": "When enabled, the app may surface a perspective without you tapping — based on what's happening around you. Requires ambient context. Off by default."
     },
     {
       "type": "group",
