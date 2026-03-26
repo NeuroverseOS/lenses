@@ -342,12 +342,78 @@ Then session_trust *= 1.08
 > shift: Session trust improves. Governance validated.
 > effect: Session trust boosted by 8%.
 
+## rule-013: Trust Recovery — Sustained Clean Use (recovery)
+Trust can be earned back through consistent clean behavior.
+
+When session_trust < 70 [state] AND ai_calls_made > 5 [state] AND ai_calls_failed == 0 [state] AND governance_blocks == 0 [state]
+Then session_trust *= 1.15
+
+> trigger: Session trust is below ACTIVE threshold, but the user has completed 5+ clean AI calls with zero failures and zero governance blocks since the last violation.
+> rule: Governance is not just punishment. Trust recovery is an explicit mechanic — the system rewards sustained clean behavior with meaningful trust increases. A single clean stretch can lift a DEGRADED session back to ACTIVE.
+> shift: Session trust improves significantly. User re-earns access to full functionality.
+> effect: Session trust boosted by 15%. Path from DEGRADED back to ACTIVE.
+
+## rule-014: Trust Recovery — Time-Based Cooldown (recovery)
+Extended clean operation restores trust gradually.
+
+When session_trust < 70 [state] AND activation_count > 20 [state] AND governance_blocks == 0 [state]
+Then session_trust *= 1.10
+
+> trigger: Session has 20+ activations with zero governance blocks. Time has passed.
+> rule: Even if earlier violations caused trust decay, sustained engagement without further violations demonstrates the session is healthy. Trust recovers gradually through continued use.
+> shift: Session trust improves moderately. Natural recovery over time.
+> effect: Session trust boosted by 10%.
+
+## rule-015: High Dismissal Rate (degradation)
+User is dismissing most signals. The lens approach may not be working.
+
+When ai_calls_made > 8 [state] AND lens_switches == 0 [state]
+Then session_trust *= 0.85
+
+> trigger: User has received 8+ lens responses without switching voice and with high dismissal rate (tracked via behavioral patterns).
+> rule: Consistent dismissals without trying a different voice suggest the active lens is wrong for this user or moment. Trust degrades to reduce proactive frequency and shorten responses — the app gets out of the way.
+> shift: Session trust degrades. Proactive frequency reduced. The app reads the room.
+> effect: Session trust reduced by 15%. Enters DEGRADED if already near threshold.
+
+# Rule Precedence
+
+Rules are evaluated in order. When multiple rules fire simultaneously:
+1. **Structural rules always fire first** (rule-002, 003, 007, 008, 009). These represent governance violations that cannot be overridden.
+2. **Recovery rules fire only if no structural or operational violations fired** in the same evaluation cycle. You cannot recover trust and violate governance in the same action.
+3. **Advantage rules fire last** (rule-005, 012, 013, 014). Trust boosts stack but are capped at session_trust = 100.
+4. **Trust decay multipliers compound**: if rule-001 (0.80) and rule-015 (0.85) both fire, result is session_trust *= 0.80 * 0.85 = 0.68.
+5. **Trust boosts do not compound in a single cycle**: only the largest boost applies per evaluation. This prevents runaway trust inflation.
+
 # Gates
 
-- ACTIVE: session_trust >= 70
-- DEGRADED: session_trust >= 30
-- SUSPENDED: session_trust > 10
-- REVOKED: session_trust <= 10
+- ACTIVE: session_trust >= 70 — Full functionality. All features available.
+- DEGRADED: session_trust >= 30 — Reduced functionality. Proactive frequency halved. Response word limits reduced by 40%. Classify delay doubled. User still has full on-demand access.
+- SUSPENDED: session_trust > 10 — Proactive disabled entirely. On-demand still works but responses are minimal.
+- REVOKED: session_trust <= 10 — All AI calls blocked. Session is frozen. User must restart the app.
+
+## Gate Transitions
+
+- ACTIVE → DEGRADED: rule-001 (rate limit) or rule-015 (high dismissal) fires when trust is near 70. This is the most common transition — the app gets quieter, not broken.
+- DEGRADED → ACTIVE: rule-013 (sustained clean use) or rule-014 (time-based cooldown) fires. 5+ clean calls or 20+ activations without violations. Trust recovers.
+- DEGRADED → SUSPENDED: Multiple operational violations compound. Trust drops below 30.
+- SUSPENDED → DEGRADED: rule-013 fires. Clean on-demand calls rebuild trust past 30.
+- Any → REVOKED: Structural violations (rule-002, 003, 007, 008, 009) with collapse conditions. These are code bugs or governance bypasses — not user behavior.
+- REVOKED → (restart): No recovery within a session. User must restart the app. This is deliberate — REVOKED means something went fundamentally wrong.
+
+## User Visibility
+
+The user never sees trust scores or gate names. Governance manifests as behavioral adjustments:
+- DEGRADED: Responses get shorter. Proactive gets quieter. The app feels "careful."
+- SUSPENDED: Proactive stops entirely. On-demand still works but is minimal.
+- REVOKED: App shows "Session needs a restart" — no technical jargon.
+
+Users CAN see their behavioral patterns on the dashboard:
+- "68% acted on · best: challenge (80%)" — this is behavioral insight, not governance state.
+- If the app feels different (quieter, shorter), the behavioral insight helps the user understand why without exposing the machinery.
+
+## Multi-Device
+
+Governance state is per-session, per-device. Session trust does not synchronize across devices. If a user has smart glasses and a phone both running Lenses, each session has independent trust. The journal (behavioral patterns, streaks) syncs via SimpleStorage because it's aggregate counts. Trust does not sync because it reflects real-time session health, not persistent identity.
 
 # Outcomes
 

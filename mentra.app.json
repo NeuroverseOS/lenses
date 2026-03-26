@@ -55,7 +55,8 @@
     "key_model": "user_provided",
     "data_sent_to_ai": ["transcription", "ambient_transcription_optional", "image_optional", "location_optional"],
     "data_retention": "none",
-    "ai_can_act": false,
+    "ai_can_act": "opt_in_only",
+    "ai_can_act_description": "Proactive perspective mode allows AI to surface insights without user activation. Requires explicit opt-in via Settings > Proactive Frequency (default: off). All ambient invariants still apply. Governed by proactive_opt_in invariant.",
     "ai_can_purchase": false,
     "ai_can_message": false
   },

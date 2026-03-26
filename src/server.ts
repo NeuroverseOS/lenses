@@ -38,8 +38,9 @@ import {
   DEFAULT_USER_RULES,
   parseWorldMarkdown,
   emitWorldDefinition,
+  simulateWorld,
 } from '@neuroverseos/governance';
-import type { AppContext, UserRules } from '@neuroverseos/governance';
+import type { AppContext, UserRules, WorldDefinition } from '@neuroverseos/governance';
 
 import {
   VOICES,
@@ -79,17 +80,28 @@ const FOLLOW_UP_WINDOW_MS = 30_000;
 /** Recency threshold: ambient entries newer than this get 3x weight */
 const RECENCY_BOOST_SECONDS = 15;
 
-/** Auto-scaled word limits based on situation */
+/** Auto-scaled word limits based on situation — glasses max ~50 words */
 const WORDS_GLANCE = 15;   // In active conversation — must be readable at a glance
-const WORDS_EXPAND = 40;   // Double-tap expand — same thought, room to breathe
-const WORDS_FOLLOWUP = 60; // Continuing a thread — more than a glance, less than a monologue
-const WORDS_DEPTH = 80;    // Alone, reflecting — room for real insight
+const WORDS_EXPAND = 30;   // Double-tap expand — same thought, room to breathe
+const WORDS_FOLLOWUP = 35; // Continuing a thread — more than a glance, less than a monologue
+const WORDS_DEPTH = 50;    // Alone, reflecting — room for real insight, still glasses-safe
 
 /** Pattern to detect "lens" trigger in speech — just one syllable */
 const LENS_TRIGGER_PATTERN = /\b(?:lens\s*(?:me)?|give\s+me\s+a\s+lens)\b/i;
 
 /** Pattern to detect one-shot voice preview: "lens this as coach" */
 const PREVIEW_VOICE_PATTERN = /\b(?:lens\s+(?:this\s+)?as|as\s+(?:a\s+)?)\s+(\w+)\b/i;
+
+/** Pattern to detect help/tutorial request: "show me commands", "how does this work", "help" */
+const HELP_PATTERN = /\b(?:show\s+(?:me\s+)?commands|how\s+(?:does|do)\s+(?:this|you)\s+work|help|what\s+can\s+(?:you|I)\s+do)\b/i;
+
+/** Tutorial steps shown through the lens display — AI teaches you the app */
+const TUTORIAL_STEPS = [
+  'Tap: get a perspective. Tap again within 30s: go deeper.',
+  'Hold temple: dismiss — "that didn\'t land." I\'ll try different next time.',
+  'Say "lens this as Coach" to preview a different voice without switching.',
+  'Switch your voice anytime in Settings on your phone.',
+];
 
 /** Maximum days of journal history kept on phone */
 const JOURNAL_MAX_DAYS = 7;
@@ -151,6 +163,94 @@ function extractModeTag(text: string): { mode: ResponseMode | 'unknown'; cleanTe
     return { mode, cleanText: text.replace(MODE_TAG_PATTERN, '').trim() };
   }
   return { mode: 'unknown', cleanText: text.trim() };
+}
+
+// ─── Governance State Bridge ─────────────────────────────────────────────────
+// Feeds app metrics into the governance engine's simulateWorld() function.
+// Rules fire. Trust decays or recovers. Gates determine app behavior.
+// The user never sees any of this — the app just reads the room.
+
+type GovernanceGate = 'ACTIVE' | 'DEGRADED' | 'SUSPENDED' | 'REVOKED';
+
+interface GovernanceState {
+  sessionTrust: number;
+  gate: GovernanceGate;
+}
+
+/**
+ * Evaluate governance rules against current session metrics.
+ * Returns updated trust score and current gate.
+ *
+ * This is the missing bridge: metrics → simulateWorld() → trust → gate.
+ * The worldfile rules define the math. This function connects it.
+ */
+function evaluateGovernanceState(
+  world: WorldDefinition | null,
+  metrics: LensSession['metrics'],
+  currentTrust: number,
+  ambientEnabled: boolean,
+  bystanderAck: boolean,
+): GovernanceState {
+  if (!world) return { sessionTrust: currentTrust, gate: classifyGate(currentTrust) };
+
+  try {
+    const result = simulateWorld(world, {
+      stateOverrides: {
+        session_trust: currentTrust,
+        ai_calls_made: metrics.aiCalls,
+        ai_calls_failed: metrics.aiFailures,
+        activation_count: metrics.activations,
+        lens_switches: metrics.voiceSwitches,
+        ambient_sends: metrics.ambientSends,
+        ambient_enabled: ambientEnabled ? 1 : 0,
+        ambient_bystander_ack: bystanderAck ? 1 : 0,
+        governance_blocks: 0,
+      },
+    });
+
+    const newTrust = typeof result.finalState?.session_trust === 'number'
+      ? Math.max(0, Math.min(100, result.finalState.session_trust))
+      : currentTrust;
+
+    return { sessionTrust: newTrust, gate: classifyGate(newTrust) };
+  } catch {
+    // If simulation fails, maintain current state — don't crash the app
+    return { sessionTrust: currentTrust, gate: classifyGate(currentTrust) };
+  }
+}
+
+function classifyGate(trust: number): GovernanceGate {
+  if (trust >= 70) return 'ACTIVE';
+  if (trust >= 30) return 'DEGRADED';
+  if (trust > 10) return 'SUSPENDED';
+  return 'REVOKED';
+}
+
+/**
+ * Apply gate-based behavioral adjustments.
+ * The user never sees gates. They feel the app adjust.
+ *
+ * ACTIVE:    Full functionality. Everything works.
+ * DEGRADED:  Responses shorter (60%). Proactive slower. App feels careful.
+ * SUSPENDED: Proactive off. On-demand minimal. App feels quiet.
+ * REVOKED:   All AI blocked. Session needs restart.
+ */
+function gateAdjustments(gate: GovernanceGate): {
+  wordMultiplier: number;
+  proactiveMultiplier: number;
+  classifyDelayMultiplier: number;
+  blockAI: boolean;
+} {
+  switch (gate) {
+    case 'ACTIVE':
+      return { wordMultiplier: 1.0, proactiveMultiplier: 1.0, classifyDelayMultiplier: 1.0, blockAI: false };
+    case 'DEGRADED':
+      return { wordMultiplier: 0.6, proactiveMultiplier: 0.5, classifyDelayMultiplier: 2.0, blockAI: false };
+    case 'SUSPENDED':
+      return { wordMultiplier: 0.4, proactiveMultiplier: 0, classifyDelayMultiplier: Infinity, blockAI: false };
+    case 'REVOKED':
+      return { wordMultiplier: 0, proactiveMultiplier: 0, classifyDelayMultiplier: Infinity, blockAI: true };
+  }
 }
 
 const AI_MODELS: Record<string, { provider: 'openai' | 'anthropic'; model: string }> = {
@@ -418,10 +518,6 @@ const EMPTY_JOURNAL: LensJournal = {
 };
 
 /**
- * Load the lens journal from the user's phone settings.
- * Returns EMPTY_JOURNAL if none exists.
- */
-/**
  * Load the lens journal from SimpleStorage.
  * SimpleStorage is a cloud-backed key-value store that persists across sessions.
  * RAM → debounced sync → MongoDB. 100KB per value, 1MB total per app/user.
@@ -448,7 +544,10 @@ async function saveJournal(session: AppSession, journal: LensJournal): Promise<v
   } catch (err) {
     console.warn('[Lenses] Failed to persist journal:', err instanceof Error ? err.message : err);
   }
-  const summary = `${journal.totalLenses} lenses | ${journal.currentStreakDays}d streak`;
+  const followRate = journal.totalSignals > 0
+    ? Math.round((journal.totalFollowThroughs / journal.totalSignals) * 100)
+    : 0;
+  const summary = `${journal.totalSignals} perspectives · ${followRate}% led to action`;
   session.dashboard.content.writeToMain(summary);
 }
 
@@ -514,37 +613,51 @@ function resolveSignal(s: LensSession, action: NextAction): void {
  * Update the dashboard with live session metrics.
  * Lets the user check their streak, call count, and voice mid-session.
  */
+/** Estimated cost per AI call at Haiku rates (input + output tokens) */
+const ESTIMATED_COST_PER_CALL = 0.001;
+
+/**
+ * Human-readable mode names for the dashboard.
+ * Users don't know what "direct" or "translate" means in isolation.
+ */
+const MODE_LABELS: Record<string, string> = {
+  direct: 'clear advice',
+  translate: 'reframes',
+  reflect: 'questions',
+  challenge: 'pushback',
+  teach: 'lessons',
+};
+
 function updateDashboardMetrics(s: LensSession): void {
   const duration = Math.round((Date.now() - s.metrics.sessionStart) / 60000);
+  const estimatedCost = (s.metrics.aiCalls * ESTIMATED_COST_PER_CALL).toFixed(3);
 
-  // Line 1: Session status
+  // Line 1: Voice + calls + estimated cost + duration
   const statusParts: string[] = [
     `${s.voice.name}`,
-    `${s.metrics.aiCalls} calls`,
+    `${s.metrics.aiCalls} calls (~$${estimatedCost})`,
   ];
-  if (s.metrics.ambientSends > 0) statusParts.push(`${s.metrics.ambientSends} ambient`);
-  if (s.metrics.proactiveInsights > 0) statusParts.push(`${s.metrics.proactiveInsights} proactive`);
-  if (s.journal.currentStreakDays > 1) statusParts.push(`${s.journal.currentStreakDays}d streak`);
   if (duration > 0) statusParts.push(`${duration}m`);
 
-  // Line 2: Behavioral insight (if enough data)
-  // Show the user which modes actually change their behavior.
-  // "You respond best to challenge (80%) · reflect (65%)"
+  // Line 2: Behavioral insight — what's working for you
   const insightLine = buildBehaviorInsight(s.journal);
 
+  // Line 3: Governance hint (only when trust is below ACTIVE)
+  const govHint = s.governance.gate !== 'ACTIVE'
+    ? '\nAdjusting — try fewer, slower taps.'
+    : '';
+
   const display = insightLine
-    ? `${statusParts.join(' · ')}\n${insightLine}`
-    : statusParts.join(' · ');
+    ? `${statusParts.join(' · ')}\n${insightLine}${govHint}`
+    : `${statusParts.join(' · ')}${govHint}`;
 
   s.appSession.dashboard.content.writeToMain(display);
 }
 
 /**
  * Build a user-visible behavior insight from the journal.
- * Shows which modes the user responds to best.
- *
- * This replaces silent optimization: the user SEES their pattern
- * and decides what to do with it. Transparent, not hidden.
+ * Uses human-readable mode labels instead of internal names.
+ * Shows which approaches actually change the user's behavior.
  *
  * Only shows after 5+ signals — need enough data to be meaningful.
  */
@@ -559,20 +672,21 @@ function buildBehaviorInsight(journal: LensJournal): string {
     .filter(([_, data]) => data.surfaced >= 3)
     .map(([mode, data]) => ({
       mode,
+      label: MODE_LABELS[mode] ?? mode,
       rate: Math.round((data.acted / data.surfaced) * 100),
     }))
     .sort((a, b) => b.rate - a.rate);
 
   if (modeEntries.length === 0) {
-    return `${followRate}% acted on`;
+    return `${followRate}% of insights led to action`;
   }
 
-  // Show top 2 modes
+  // Show top 2 modes with human-readable labels
   const topModes = modeEntries.slice(0, 2)
-    .map(m => `${m.mode} (${m.rate}%)`)
+    .map(m => `${m.label} (${m.rate}%)`)
     .join(' · ');
 
-  return `${followRate}% acted on · best: ${topModes}`;
+  return `${followRate}% led to action · you respond best to: ${topModes}`;
 }
 
 /**
@@ -664,6 +778,10 @@ interface LensSession {
   lastWasProactive: boolean;
   /** Pending signal: created when AI responds, resolved when user takes next action */
   pendingSignal: SignalRecord | null;
+  /** Governance state — trust score and current gate */
+  governance: GovernanceState;
+  /** The loaded app world for simulateWorld() calls */
+  appWorldDef: WorldDefinition | null;
   /** MentraOS session handle for saving journal */
   appSession: AppSession;
   /** Lens journal loaded from phone */
@@ -797,6 +915,8 @@ class LensesApp extends AppServer {
       lastMode: 'unknown',
       lastWasProactive: false,
       pendingSignal: null,
+      governance: { sessionTrust: 100, gate: 'ACTIVE' },
+      appWorldDef: this.appWorld,
       appSession: session,
       journal,
       proactive: new ProactiveEngine(proactiveFreq),
@@ -894,6 +1014,21 @@ class LensesApp extends AppServer {
         purgeExpiredAmbient(s.ambientBuffer);
       }
 
+      // ── Tutorial: "show me commands" / "help" ─────────────────────────
+      // The app teaches you how to use it — always through the AI, on the glasses.
+      if (HELP_PATTERN.test(userText)) {
+        const displayCheck = s.executor.evaluate('display_response', s.appContext);
+        if (displayCheck.allowed) {
+          // Show tutorial steps one at a time — each tap advances
+          const step = s.metrics.activations % TUTORIAL_STEPS.length;
+          session.layouts.showDoubleTextWall(
+            `${s.voice.name} · commands`,
+            TUTORIAL_STEPS[step],
+          );
+        }
+        return;
+      }
+
       // ── One-shot voice preview: "lens this as coach" ──────────────────
       // Taste a different voice without switching. One-shot, then back.
       const previewMatch = userText.match(PREVIEW_VOICE_PATTERN);
@@ -952,13 +1087,18 @@ class LensesApp extends AppServer {
         s.proactive.addUtterance(userText);
 
         // Reset the classify timer — wait for a pause in speech
+        // Gate adjustments: DEGRADED = 2x slower, SUSPENDED/REVOKED = no classify
         if (s.classifyTimer) clearTimeout(s.classifyTimer);
 
+        const proactiveAdj = gateAdjustments(s.governance.gate);
         const wordCount = userText.split(/\s+/).length;
-        if (wordCount >= MIN_CLASSIFY_WORDS) {
+        if (wordCount >= MIN_CLASSIFY_WORDS && proactiveAdj.proactiveMultiplier > 0) {
+          const delay = Math.round(UTTERANCE_CLASSIFY_DELAY_MS * proactiveAdj.classifyDelayMultiplier);
           s.classifyTimer = setTimeout(() => {
+            // Guard: session may have been cleaned up during the delay
+            if (!sessions.has(sessionId)) return;
             this.proactiveClassify(s, session, sessionId);
-          }, UTTERANCE_CLASSIFY_DELAY_MS);
+          }, delay);
         }
       }
 
@@ -1396,8 +1536,14 @@ class LensesApp extends AppServer {
     s.metrics.aiCalls++;
 
     try {
-      // maxWords is baked into the system prompt (auto-scaled per interaction)
-      const currentMaxWords = hasRecentAmbient(s.ambientBuffer) ? WORDS_GLANCE : WORDS_DEPTH;
+      // maxWords is auto-scaled per interaction AND adjusted by governance gate
+      const adjustments = gateAdjustments(s.governance.gate);
+      if (adjustments.blockAI) {
+        session.layouts.showTextWall('Session needs a restart.');
+        return;
+      }
+      const baseMaxWords = hasRecentAmbient(s.ambientBuffer) ? WORDS_GLANCE : WORDS_DEPTH;
+      const currentMaxWords = Math.max(5, Math.round(baseMaxWords * adjustments.wordMultiplier));
       const response = await callUserAI(s.aiProvider, s.systemPrompt, messages, userText, currentMaxWords);
 
       if (response.text) {
@@ -1445,6 +1591,15 @@ class LensesApp extends AppServer {
 
         // UX: Update dashboard with mid-session metrics so user can check anytime
         updateDashboardMetrics(s);
+
+        // ── Governance: re-evaluate trust after every AI call ────────────
+        s.governance = evaluateGovernanceState(
+          s.appWorldDef,
+          s.metrics,
+          s.governance.sessionTrust,
+          s.ambientBuffer.enabled,
+          s.ambientBuffer.bystanderAcknowledged,
+        );
       }
     } catch (err) {
       s.metrics.aiFailures++;
