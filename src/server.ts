@@ -36,8 +36,10 @@ import type { AppSession, ButtonPress, TranscriptionData } from '@mentra/sdk';
 import {
   MentraGovernedExecutor,
   DEFAULT_USER_RULES,
-} from '../../../src/adapters/mentraos';
-import type { AppContext, UserRules } from '../../../src/adapters/mentraos';
+  parseWorldMarkdown,
+  emitWorldDefinition,
+} from '@neuroverseos/governance';
+import type { AppContext, UserRules } from '@neuroverseos/governance';
 
 import {
   VOICES,
@@ -56,8 +58,6 @@ import {
 } from './proactive';
 
 import { loadLensesGovernedWorld } from './worlds/lenses-governance';
-import { parseWorldMarkdown } from '../../../src/engine/bootstrap-parser';
-import { emitWorldDefinition } from '../../../src/engine/bootstrap-emitter';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -102,6 +102,56 @@ const MIN_CLASSIFY_WORDS = 5;
 
 /** Word limit for proactive perspectives (shorter than on-demand — uninvited) */
 const WORDS_PROACTIVE = 12;
+
+/** Valid mode tags the AI can output */
+const VALID_MODES = ['direct', 'translate', 'reflect', 'challenge', 'teach'] as const;
+type ResponseMode = typeof VALID_MODES[number];
+
+/** Pattern to extract [MODE:xxx] tag from AI response */
+const MODE_TAG_PATTERN = /^\[MODE:(\w+)\]\s*/;
+
+/** Maximum recent signals to keep in the journal */
+const MAX_RECENT_SIGNALS = 50;
+
+// ─── Behavioral Tracking ─────────────────────────────────────────────────────
+// Unified signal model: same schema across all NeuroverseOS apps.
+// Each app defines its own signal types but uses the same tracking structure.
+
+/** What the user did after receiving a signal */
+type NextAction = 'acted' | 'delayed' | 'switched' | 'dropped';
+
+interface SignalRecord {
+  /** What type of signal (app-specific — Lenses uses mode names) */
+  signalType: string;
+  /** Which app generated this signal */
+  app: 'lenses';
+  /** Was this signal dismissed via long-press? */
+  dismissed: boolean;
+  /** What did the user do after receiving this signal? */
+  nextAction: NextAction;
+  /** How far into the session (seconds) */
+  timeIntoSession: number;
+  /** Was this proactive (uninvited) or on-demand? */
+  proactive: boolean;
+  /** Which mode did the AI use? */
+  mode: ResponseMode | 'unknown';
+}
+
+/**
+ * Strip [MODE:xxx] tag from AI response and return the mode + clean text.
+ * If no valid tag found, returns 'unknown' mode and original text.
+ */
+function extractModeTag(text: string): { mode: ResponseMode | 'unknown'; cleanText: string } {
+  const match = text.match(MODE_TAG_PATTERN);
+  if (match) {
+    const modeCandidate = match[1].toLowerCase();
+    const mode = VALID_MODES.includes(modeCandidate as ResponseMode)
+      ? (modeCandidate as ResponseMode)
+      : 'unknown';
+    return { mode, cleanText: text.replace(MODE_TAG_PATTERN, '').trim() };
+  }
+  return { mode: 'unknown', cleanText: text.trim() };
+}
 
 const AI_MODELS: Record<string, { provider: 'openai' | 'anthropic'; model: string }> = {
   'auto': { provider: 'anthropic', model: 'claude-haiku-4-5-20251001' },
@@ -182,7 +232,8 @@ async function callUserAI(
 // ─── Governance Setup ────────────────────────────────────────────────────────
 
 function loadPlatformWorld() {
-  const worldPath = resolve(__dirname, '../../../src/worlds/mentraos-smartglasses.nv-world.md');
+  // Platform world ships with @neuroverseos/governance package
+  const worldPath = resolve(dirname(require.resolve('@neuroverseos/governance')), 'worlds/mentraos-smartglasses.nv-world.md');
   const worldMd = readFileSync(worldPath, 'utf-8');
   const parseResult = parseWorldMarkdown(worldMd);
 
@@ -312,19 +363,57 @@ interface JournalDay {
   voiceUsed: string;     // Primary voice for the day
 }
 
+/**
+ * Unified Journal Schema — shared structure across all NeuroverseOS apps.
+ * Each app stores its own journal in its own SimpleStorage namespace,
+ * but uses the same shape so cross-app patterns can emerge at the schema level.
+ *
+ * Governance: only aggregate counts and behavioral patterns. No content.
+ * No conversation text. No ambient speech. No user profiling beyond
+ * what the user can see and delete.
+ */
 interface LensJournal {
-  totalLenses: number;
+  totalSignals: number;
+  totalFollowThroughs: number;
   totalDismissals: number;
   currentStreakDays: number;
   lastSessionDate: string;
-  recentDays: JournalDay[];  // Rolling 7-day window
+
+  /** Per-signal-type effectiveness (key = mode name for Lenses) */
+  signalEffectiveness: Record<string, {
+    surfaced: number;
+    acted: number;
+    dismissed: number;
+  }>;
+
+  /** Behavioral sequence patterns — what users do after receiving signals */
+  behaviorPatterns: {
+    acted: number;
+    delayed: number;
+    switched: number;
+    dropped: number;
+  };
+
+  /** Mode effectiveness — follow-through rate per mode */
+  modeEffectiveness: Record<string, number>;
+
+  /** Rolling window of recent signals (capped at MAX_RECENT_SIGNALS) */
+  recentSignals: SignalRecord[];
+
+  /** Legacy: daily rollup for streak tracking */
+  recentDays: JournalDay[];
 }
 
 const EMPTY_JOURNAL: LensJournal = {
-  totalLenses: 0,
+  totalSignals: 0,
+  totalFollowThroughs: 0,
   totalDismissals: 0,
   currentStreakDays: 0,
   lastSessionDate: '',
+  signalEffectiveness: {},
+  behaviorPatterns: { acted: 0, delayed: 0, switched: 0, dropped: 0 },
+  modeEffectiveness: {},
+  recentSignals: [],
   recentDays: [],
 };
 
@@ -332,26 +421,158 @@ const EMPTY_JOURNAL: LensJournal = {
  * Load the lens journal from the user's phone settings.
  * Returns EMPTY_JOURNAL if none exists.
  */
-function loadJournal(settings: Record<string, unknown> | null): LensJournal {
-  const raw = settings?.lens_journal as LensJournal | undefined;
-  if (!raw) return { ...EMPTY_JOURNAL };
-  return raw;
+/**
+ * Load the lens journal from SimpleStorage.
+ * SimpleStorage is a cloud-backed key-value store that persists across sessions.
+ * RAM → debounced sync → MongoDB. 100KB per value, 1MB total per app/user.
+ * The journal is tiny (~200 bytes of aggregate counts) — well within limits.
+ */
+async function loadJournal(session: AppSession): Promise<LensJournal> {
+  try {
+    const raw = await session.storage.get('lens_journal');
+    if (raw && typeof raw === 'object') return raw as unknown as LensJournal;
+  } catch {
+    // First session or storage unavailable — start fresh
+  }
+  return { ...EMPTY_JOURNAL };
 }
 
 /**
- * Write journal summary to the dashboard.
- *
- * SDK limitation: SettingsManager is read-only from the app side.
- * Settings are defined in app_config.json and managed by MentraOS Cloud.
- * We can't persist the journal to settings — instead we display a
- * session summary on the dashboard when the session ends.
- *
- * For true cross-session persistence, we'd need a webview backend.
- * For now, the journal lives in RAM and the dashboard shows the summary.
+ * Save the lens journal to SimpleStorage and update the dashboard.
+ * Governance: phone_local_journal_only — only aggregate counts, no content.
+ * SimpleStorage syncs to MentraOS Cloud (user's account), not NeuroverseOS servers.
  */
-function writeJournalToDashboard(session: AppSession, journal: LensJournal): void {
+async function saveJournal(session: AppSession, journal: LensJournal): Promise<void> {
+  try {
+    await session.storage.set('lens_journal', journal as unknown as Record<string, unknown>);
+  } catch (err) {
+    console.warn('[Lenses] Failed to persist journal:', err instanceof Error ? err.message : err);
+  }
   const summary = `${journal.totalLenses} lenses | ${journal.currentStreakDays}d streak`;
   session.dashboard.content.writeToMain(summary);
+}
+
+/**
+ * Resolve the pending signal — record what the user did after receiving it.
+ *
+ * The behavioral sequence:
+ *   AI responds → pendingSignal created → user does something → resolve
+ *
+ * nextAction meanings:
+ *   acted   — user tapped again (follow-up or new lens) = signal resonated
+ *   delayed — user returned after >30s = latent resonance
+ *   switched — user changed voice = wrong lens, right moment
+ *   dropped — session ended without acting = wrong moment entirely
+ *
+ * All signals are recorded in the journal. No content is stored —
+ * only the signal type, mode, and what happened next.
+ */
+function resolveSignal(s: LensSession, action: NextAction): void {
+  if (!s.pendingSignal) return;
+
+  s.pendingSignal.nextAction = action;
+  s.pendingSignal.dismissed = action === 'dropped' || s.pendingSignal.dismissed;
+
+  // Record in journal
+  const signal = s.pendingSignal;
+  s.journal.totalSignals++;
+
+  if (action === 'acted' || action === 'delayed') {
+    s.journal.totalFollowThroughs++;
+  }
+  if (signal.dismissed) {
+    s.journal.totalDismissals++;
+  }
+
+  // Update signal effectiveness for this signal type
+  if (!s.journal.signalEffectiveness[signal.mode]) {
+    s.journal.signalEffectiveness[signal.mode] = { surfaced: 0, acted: 0, dismissed: 0 };
+  }
+  const eff = s.journal.signalEffectiveness[signal.mode];
+  eff.surfaced++;
+  if (action === 'acted' || action === 'delayed') eff.acted++;
+  if (signal.dismissed) eff.dismissed++;
+
+  // Update behavioral patterns
+  s.journal.behaviorPatterns[action]++;
+
+  // Update mode effectiveness (follow-through rate)
+  if (eff.surfaced > 0) {
+    s.journal.modeEffectiveness[signal.mode] = Math.round((eff.acted / eff.surfaced) * 100);
+  }
+
+  // Add to recent signals (rolling window)
+  s.journal.recentSignals.push(signal);
+  if (s.journal.recentSignals.length > MAX_RECENT_SIGNALS) {
+    s.journal.recentSignals = s.journal.recentSignals.slice(-MAX_RECENT_SIGNALS);
+  }
+
+  s.pendingSignal = null;
+}
+
+/**
+ * Update the dashboard with live session metrics.
+ * Lets the user check their streak, call count, and voice mid-session.
+ */
+function updateDashboardMetrics(s: LensSession): void {
+  const duration = Math.round((Date.now() - s.metrics.sessionStart) / 60000);
+
+  // Line 1: Session status
+  const statusParts: string[] = [
+    `${s.voice.name}`,
+    `${s.metrics.aiCalls} calls`,
+  ];
+  if (s.metrics.ambientSends > 0) statusParts.push(`${s.metrics.ambientSends} ambient`);
+  if (s.metrics.proactiveInsights > 0) statusParts.push(`${s.metrics.proactiveInsights} proactive`);
+  if (s.journal.currentStreakDays > 1) statusParts.push(`${s.journal.currentStreakDays}d streak`);
+  if (duration > 0) statusParts.push(`${duration}m`);
+
+  // Line 2: Behavioral insight (if enough data)
+  // Show the user which modes actually change their behavior.
+  // "You respond best to challenge (80%) · reflect (65%)"
+  const insightLine = buildBehaviorInsight(s.journal);
+
+  const display = insightLine
+    ? `${statusParts.join(' · ')}\n${insightLine}`
+    : statusParts.join(' · ');
+
+  s.appSession.dashboard.content.writeToMain(display);
+}
+
+/**
+ * Build a user-visible behavior insight from the journal.
+ * Shows which modes the user responds to best.
+ *
+ * This replaces silent optimization: the user SEES their pattern
+ * and decides what to do with it. Transparent, not hidden.
+ *
+ * Only shows after 5+ signals — need enough data to be meaningful.
+ */
+function buildBehaviorInsight(journal: LensJournal): string {
+  if (journal.totalSignals < 5) return '';
+
+  // Overall follow-through rate
+  const followRate = Math.round((journal.totalFollowThroughs / journal.totalSignals) * 100);
+
+  // Top modes by effectiveness (only show modes with 3+ signals)
+  const modeEntries = Object.entries(journal.signalEffectiveness)
+    .filter(([_, data]) => data.surfaced >= 3)
+    .map(([mode, data]) => ({
+      mode,
+      rate: Math.round((data.acted / data.surfaced) * 100),
+    }))
+    .sort((a, b) => b.rate - a.rate);
+
+  if (modeEntries.length === 0) {
+    return `${followRate}% acted on`;
+  }
+
+  // Show top 2 modes
+  const topModes = modeEntries.slice(0, 2)
+    .map(m => `${m.mode} (${m.rate}%)`)
+    .join(' · ');
+
+  return `${followRate}% acted on · best: ${topModes}`;
 }
 
 /**
@@ -359,26 +580,46 @@ function writeJournalToDashboard(session: AppSession, journal: LensJournal): voi
  * Gives the voice knowledge of the user's recent patterns.
  */
 function journalContext(journal: LensJournal): string {
-  if (journal.totalLenses === 0) return '';
+  if (journal.totalSignals === 0) return '';
 
   const lines: string[] = [];
   lines.push(`[JOURNAL — The user's recent Lens history. Use this to personalize your response.]`);
-  lines.push(`Total lenses: ${journal.totalLenses}. Total dismissals: ${journal.totalDismissals}. Streak: ${journal.currentStreakDays} days.`);
+
+  const followRate = journal.totalSignals > 0
+    ? Math.round((journal.totalFollowThroughs / journal.totalSignals) * 100)
+    : 0;
+  lines.push(`Total signals: ${journal.totalSignals}. Follow-through: ${followRate}%. Streak: ${journal.currentStreakDays} days.`);
+
+  // Show which modes work best for this user (if enough data)
+  const topModes = Object.entries(journal.signalEffectiveness)
+    .filter(([_, data]) => data.surfaced >= 3)
+    .map(([mode, data]) => ({
+      mode,
+      rate: Math.round((data.acted / data.surfaced) * 100),
+    }))
+    .sort((a, b) => b.rate - a.rate);
+
+  if (topModes.length > 0) {
+    const modeStr = topModes.slice(0, 3).map(m => `${m.mode} (${m.rate}%)`).join(', ');
+    lines.push(`Mode effectiveness: ${modeStr}. Lean toward what works unless exploring.`);
+  }
+
+  // Detect behavioral patterns
+  const { acted, delayed, switched, dropped } = journal.behaviorPatterns;
+  const total = acted + delayed + switched + dropped;
+  if (total > 5) {
+    if (delayed > total * 0.3) {
+      lines.push(`Pattern: user often returns to dismissed signals (${Math.round((delayed / total) * 100)}% delayed). Signals may land but need time.`);
+    }
+    if (dropped > total * 0.4) {
+      lines.push(`Pattern: ${Math.round((dropped / total) * 100)}% of signals are dropped. Consider a different approach or mode.`);
+    }
+  }
 
   if (journal.recentDays.length > 0) {
     const recent = journal.recentDays.slice(-3);
     const summary = recent.map(d => `${d.date}: ${d.lenses} lenses, ${d.dismissals} dismissed`).join('. ');
     lines.push(`Recent: ${summary}.`);
-  }
-
-  // Detect patterns
-  const totalRecent = journal.recentDays.reduce((sum, d) => sum + d.dismissals, 0);
-  const totalLensesRecent = journal.recentDays.reduce((sum, d) => sum + d.lenses, 0);
-  if (totalRecent > 3 && totalLensesRecent > 0) {
-    const dismissRate = Math.round((totalRecent / totalLensesRecent) * 100);
-    if (dismissRate > 30) {
-      lines.push(`Pattern: ${dismissRate}% dismissal rate this week — the user may need a different approach.`);
-    }
   }
 
   return lines.join('\n');
@@ -417,6 +658,12 @@ interface LensSession {
   lastLensInput: string;
   /** Number of consecutive dismissals — AI adjusts when user long-presses */
   dismissals: number;
+  /** The mode the AI chose for the last response */
+  lastMode: ResponseMode | 'unknown';
+  /** Whether the last response was proactive (uninvited) */
+  lastWasProactive: boolean;
+  /** Pending signal: created when AI responds, resolved when user takes next action */
+  pendingSignal: SignalRecord | null;
   /** MentraOS session handle for saving journal */
   appSession: AppSession;
   /** Lens journal loaded from phone */
@@ -517,7 +764,7 @@ class LensesApp extends AppServer {
 
     // ── Load journal from phone ────────────────────────────────────────────
 
-    const journal = loadJournal(settings);
+    const journal = await loadJournal(session);
     // Proactive defaults to OFF — user must explicitly opt in (governance: proactive_opt_in)
     const proactiveFreq = session.settings.get<string>('proactive_frequency', 'off') as ProactiveFrequency;
 
@@ -547,6 +794,9 @@ class LensesApp extends AppServer {
       lastWasGlance: false,
       lastLensInput: '',
       dismissals: 0,
+      lastMode: 'unknown',
+      lastWasProactive: false,
+      pendingSignal: null,
       appSession: session,
       journal,
       proactive: new ProactiveEngine(proactiveFreq),
@@ -735,7 +985,15 @@ class LensesApp extends AppServer {
    */
   private async lensMe(s: LensSession, session: AppSession, sessionId: string): Promise<void> {
     s.metrics.activations++;
+    s.lastWasProactive = false;
     const isGlance = hasRecentAmbient(s.ambientBuffer);
+
+    // Behavioral tracking: if there's a pending signal from a previous interaction
+    // and this is a NEW lens (not a follow-up), resolve the previous as 'delayed'
+    // because the user came back after the follow-up window expired
+    if (s.pendingSignal) {
+      resolveSignal(s, 'delayed');
+    }
 
     if (s.transcriptionBuffer.length === 0) {
       const hasAmbient = s.ambientBuffer.enabled && s.ambientBuffer.bystanderAcknowledged;
@@ -890,6 +1148,10 @@ class LensesApp extends AppServer {
     s.lastLensTime = 0;
     s.lastWasGlance = false;
 
+    // Behavioral tracking: user explicitly dismissed → dropped
+    if (s.pendingSignal) s.pendingSignal.dismissed = true;
+    resolveSignal(s, 'dropped');
+
     if (s.conversationHistory.length >= 2) {
       s.conversationHistory = s.conversationHistory.slice(0, -2);
     }
@@ -979,22 +1241,46 @@ class LensesApp extends AppServer {
         );
 
         if (response.text) {
+          // Extract mode tag from proactive response
+          const { mode: proactiveMode, cleanText: proactiveCleanText } = extractModeTag(response.text);
+
           // Deduplicate — don't show the same perspective twice
-          if (s.proactive.isDuplicate(response.text)) {
+          if (s.proactive.isDuplicate(proactiveCleanText)) {
             s.metrics.proactiveSilences++;
             return;
           }
 
+          // Resolve any previous pending signal before creating a new one
+          resolveSignal(s, 'acted');
+
+          // Create pending signal for proactive response
+          s.lastWasProactive = true;
+          s.lastMode = proactiveMode;
+          s.pendingSignal = {
+            signalType: proactiveMode,
+            app: 'lenses',
+            dismissed: false,
+            nextAction: 'dropped',
+            timeIntoSession: Math.round((Date.now() - s.metrics.sessionStart) / 1000),
+            proactive: true,
+            mode: proactiveMode,
+          };
+
           // Governance check: can we display?
           const displayCheck = s.executor.evaluate('display_text_wall', s.appContext);
           if (displayCheck.allowed) {
-            session.layouts.showTextWall(response.text);
+            // UX: Proactive responses are visually distinct — user must know
+            // the AI spoke up on its own vs being asked. Trust depends on this.
+            session.layouts.showDoubleTextWall(
+              `${s.voice.name} · unprompted`,
+              proactiveCleanText,
+            );
           }
 
           // Record for deduplication
           s.proactive.recordPerspective({
-            text: response.text,
-            mode: classification.suggestedMode ?? 'direct',
+            text: proactiveCleanText,
+            mode: proactiveMode,
             timestamp: Date.now(),
             voiceId: s.voice.id,
           });
@@ -1002,7 +1288,7 @@ class LensesApp extends AppServer {
           // Add to conversation history so follow-up taps have context
           s.conversationHistory.push(
             { role: 'user', content: '[Proactive perspective triggered by conversation context]' },
-            { role: 'assistant', content: response.text },
+            { role: 'assistant', content: proactiveCleanText },
           );
           if (s.conversationHistory.length > 6) {
             s.conversationHistory = s.conversationHistory.slice(-6);
@@ -1026,6 +1312,9 @@ class LensesApp extends AppServer {
   private switchVoice(s: LensSession, newVoice: Voice, session: AppSession): void {
     const world = loadWorldForVoice(newVoice.id);
     if (!world) return;
+
+    // Behavioral tracking: user switched voice → wrong lens, right moment
+    resolveSignal(s, 'switched');
 
     s.voice = newVoice;
     s.world = world;
@@ -1112,20 +1401,50 @@ class LensesApp extends AppServer {
       const response = await callUserAI(s.aiProvider, s.systemPrompt, messages, userText, currentMaxWords);
 
       if (response.text) {
+        // ── Extract mode tag ────────────────────────────────────────────
+        // AI outputs [MODE:challenge] before the response. Strip it,
+        // track it, display only the clean text.
+        const { mode, cleanText } = extractModeTag(response.text);
+        s.lastMode = mode;
+
+        // ── Resolve the PREVIOUS pending signal ─────────────────────────
+        // The user tapped again → they acted on the last signal.
+        // (If they dismissed, that's handled in dismissLens.
+        //  If they switched voice, that's handled in switchVoice.)
+        resolveSignal(s, 'acted');
+
+        // ── Create a new pending signal ─────────────────────────────────
+        s.pendingSignal = {
+          signalType: mode,
+          app: 'lenses',
+          dismissed: false,
+          nextAction: 'dropped', // default until resolved
+          timeIntoSession: Math.round((Date.now() - s.metrics.sessionStart) / 1000),
+          proactive: s.lastWasProactive,
+          mode,
+        };
+
         // Governance check: can we display?
         const displayCheck = s.executor.evaluate('display_text_wall', s.appContext);
         if (displayCheck.allowed) {
-          session.layouts.showTextWall(response.text);
+          // UX: Always show active voice name so user never forgets which lens they're on
+          session.layouts.showDoubleTextWall(
+            `${s.voice.name}`,
+            cleanText,
+          );
         }
 
         // Update conversation history (keep last 3 exchanges)
         s.conversationHistory.push(
           { role: 'user', content: userText },
-          { role: 'assistant', content: response.text },
+          { role: 'assistant', content: cleanText },
         );
         if (s.conversationHistory.length > 6) {
           s.conversationHistory = s.conversationHistory.slice(-6);
         }
+
+        // UX: Update dashboard with mid-session metrics so user can check anytime
+        updateDashboardMetrics(s);
       }
     } catch (err) {
       s.metrics.aiFailures++;
@@ -1156,15 +1475,19 @@ class LensesApp extends AppServer {
       if (s.classifyTimer) clearTimeout(s.classifyTimer);
       s.proactive.destroy();
 
+      // Resolve any pending signal — session ended without acting
+      resolveSignal(s, 'dropped');
+
       // ── Save journal to phone ──────────────────────────────────────────
       // Governance: phone-local only. User owns it. User can delete it.
       // No ambient speech is persisted — only aggregate counts.
       if (s.metrics.activations > 0) {
         const today = new Date().toISOString().slice(0, 10);
 
-        // Update totals
-        s.journal.totalLenses += s.metrics.aiCalls;
-        s.journal.totalDismissals += s.metrics.dismissals;
+        // Note: totalSignals, totalFollowThroughs, totalDismissals,
+        // signalEffectiveness, behaviorPatterns, modeEffectiveness,
+        // and recentSignals are all updated in real-time by resolveSignal().
+        // Here we only handle the daily rollup and streak.
 
         // Update streak
         const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
@@ -1198,7 +1521,7 @@ class LensesApp extends AppServer {
           s.journal.recentDays = s.journal.recentDays.slice(-JOURNAL_MAX_DAYS);
         }
 
-        writeJournalToDashboard(s.appSession, s.journal);
+        await saveJournal(s.appSession, s.journal);
       }
 
       const duration = Math.round((Date.now() - s.metrics.sessionStart) / 1000);

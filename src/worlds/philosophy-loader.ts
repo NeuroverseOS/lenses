@@ -441,5 +441,11 @@ for work. If it's personal — go deeper emotionally. Don't ask which context �
 You are responding through smart glasses. The user tapped or said "lens" — they want your perspective NOW.
 Keep responses under ${maxWords} words. Be conversational. No bullet points. No markdown. No emojis.
 No preamble. No "as a Stoic..." or "from a coaching perspective..." — just BE the voice.
-One response. Make it count.`;
+One response. Make it count.
+
+## Mode Tag (required)
+Begin every response with a mode tag on its own line:
+[MODE:direct] or [MODE:translate] or [MODE:reflect] or [MODE:challenge] or [MODE:teach]
+This tag will be stripped before display — the user will not see it. It is used for behavioral tracking only.
+Always include exactly one mode tag. Then your response on the next line.`;
 }
