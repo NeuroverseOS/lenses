@@ -4,7 +4,9 @@
 
 Same AI. Different perspective. Lenses is a governed AI companion for smart glasses that lets you choose *how* your AI thinks — Stoic, Coach, Hype Man, Samurai, Monk, Socratic, and more — without owning or training a model. You bring your API key. We bring the worldview.
 
-Built on [NeuroverseOS](https://neuroverseos.com) and powered by `.nv-world.md` worldfiles — a declarative format for encoding entire philosophical traditions, governance rules, and behavioral boundaries into something an AI can execute.
+Built on [NeuroverseOS](https://neuroverseos.com) governance and powered by `.nv-world.md` worldfiles — a declarative format for encoding philosophical traditions, governance rules, and behavioral boundaries into something an AI can execute.
+
+**Requires an AI API key** (Anthropic or OpenAI). Your key, your cost (~$0.001 per tap), your data. We never see it.
 
 ---
 
@@ -41,6 +43,8 @@ Each philosophy worldfile encodes a real intellectual tradition:
 | `cbt.nv-world.md` | CBT | Your thoughts shape your reality. Test them. |
 | `existentialism.nv-world.md` | Existentialist | You are free. That's the terrifying part. |
 
+All 10 worldfiles include **Boundaries** with clinical referral triggers. Philosophy is powerful. It is not therapy. The worldfiles know the difference.
+
 ### Anatomy of a Worldfile
 
 ```markdown
@@ -48,7 +52,6 @@ Each philosophy worldfile encodes a real intellectual tradition:
 world_id: stoicism
 name: Stoicism
 type: philosophy
-origin: tradition
 tradition: Hellenistic Greek / Roman
 era: 3rd century BCE — 2nd century CE
 ---
@@ -89,27 +92,23 @@ Life is not under your control. Your response to it is.
 - emotion: reserved
 ```
 
-Every worldfile includes **Boundaries** — hard limits on what the lens will and won't do, including clinical referral triggers. Philosophy is powerful. It is not therapy. The worldfiles know the difference.
+Every worldfile requires: **Thesis**, **Principles** (with before/after examples), **Voices** (historical figures), **5 Modes** (direct, translate, reflect, challenge, teach), **Boundaries** (clinical referrals and scope limits), and **Tone**.
 
-### Governance Worldfiles
+The validation engine (`npm run validate`) checks structure, required sections, and depth.
 
-The app itself is governed by `lenses-app.nv-world.md` — 500+ lines of declarative rules covering:
+### Governance Worldfile
 
-- **Invariants** — Immutable structural guarantees (API key never leaves device, ambient speech never persisted, user always controls activation)
-- **State** — Session trust score, activation counts, failure rates
-- **Rules** — Declarative conditions ("When `ai_calls_made > 10` in 60s, `session_trust *= 0.80`")
-- **Gates** — Trust thresholds that determine app behavior (ACTIVE / DEGRADED / SUSPENDED / REVOKED)
-- **Guards** — Intent-based blocking (structural, operational, advisory, reward)
+The app itself is governed by `lenses-app.nv-world.md` — 560+ lines of declarative rules:
 
-Three layers of governance, top wins:
+- **11 Invariants** — Immutable structural guarantees (API key integrity, ambient never persisted, user controls activation)
+- **16 State Variables** — Session trust, activation counts, failure rates, ambient metrics
+- **15 Rules** — Declarative conditions with trust effects. 5 structural (governance violations), 4 operational (rate limits, stack limits), 2 degradation (failures, high dismissals), 2 recovery (clean use, time-based cooldown), 2 advantage (clean sessions, governed ambient)
+- **4 Gates** — Trust thresholds: ACTIVE (>=70), DEGRADED (>=30), SUSPENDED (>10), REVOKED (<=10)
+- **Rule Precedence** — Structural first, recovery only if clean, advantage last. Decay compounds, boosts capped.
+- **Gate Transitions** — Documented paths: ACTIVE to DEGRADED (rate limit or dismissals), DEGRADED back to ACTIVE (5+ clean calls), through to REVOKED (structural violations only)
+- **3 Assumption Profiles** — Standard, Privacy First, Power User
 
-```
-1. User Rules     — Your personal cross-app governance (you are king)
-2. Platform World — MentraOS enforces hardware + session safety
-3. App World      — Lenses-specific behavior rules
-```
-
-The governance engine evaluates *every action before it happens*. An AI call that violates a guard never leaves the device.
+The governance engine runs `simulateWorld()` after every AI call. Rules fire. Trust decays and recovers. Gates transition. The user never sees trust scores — the app just reads the room.
 
 ---
 
@@ -133,14 +132,33 @@ Your words → Governance check → Philosophy compiled → Your AI responds:
   Coach:      "What would you do if you could only pick three?"
 ```
 
+### Interaction Model
+
+| Gesture | What Happens |
+|---------|-------------|
+| **Tap** | Get a perspective through your active voice |
+| **Tap again (within 30s)** | Go deeper — follow-up on the last response |
+| **Long press** | Dismiss — "that didn't land." AI adjusts approach |
+| **Say "help"** | Cycles through 4 help steps on the glasses display |
+| **Say "lens this as Coach"** | Preview a different voice without switching |
+| **Say "lens" or "lens me"** | Voice-activated tap (for when you're alone) |
+
+Response length auto-scales to context:
+- **In a conversation** (ambient detects recent speech): 15 words. Glanceable.
+- **Alone, reflecting**: 50 words. Room for real insight.
+- **Follow-up**: 35 words. Continuing the thread.
+- **Double-tap expand**: 30 words. Same thought, more room.
+
+Nothing exceeds 50 words on the glasses display.
+
 ### The Flow
 
 1. **You install Lenses** on MentraOS smart glasses
-2. **You bring your own API key** (Claude or GPT) — your key, your cost, your data
+2. **You add your API key** (Claude or GPT) in Settings on your phone
 3. **You pick a lens** — Stoic, Coach, Hype Man, any worldview
-4. **You tap to activate** — Lenses listens, transcribes, compiles the philosophy into a system prompt, calls *your* AI
-5. **You get perspective** — not generic advice, but a *worldview-shaped response* on your glasses display
-6. **Everything stays local** — NeuroverseOS sees nothing. No conversations, no ambient data, no keys.
+4. **You tap to activate** — Lenses transcribes, compiles the philosophy, calls *your* AI
+5. **You get perspective** — a worldview-shaped response on your glasses display
+6. **The app learns** — tracks which modes change your behavior and shows you the pattern
 
 ### Lens Stacking
 
@@ -166,36 +184,79 @@ With opt-in ambient mode, Lenses passively buffers nearby speech in RAM. When yo
 
 The buffer is never persisted, never sent until you activate, and destroyed when the session ends.
 
+### Proactive Mode (opt-in)
+
+When enabled, Lenses classifies conversation moments and surfaces uninvited perspectives — 12 words max, labeled `"unprompted"` so you always know the AI spoke up on its own. Default: off. Requires ambient context.
+
 ---
 
-## Building World View Models
+## Behavioral Tracking
 
-Worldfiles are a framework for encoding *any* perspective into executable AI governance. This goes beyond Lenses — it's a pattern for building world view POVs at scale.
+Every AI response includes a `[MODE:tag]` (stripped before display) that tracks which interaction mode the AI chose: clear advice, reframes, questions, pushback, or lessons.
 
-### Why Worldfiles Work
+After each response, the app tracks what you did next:
 
-**Structured, not freeform.** A worldfile isn't a prompt. It's a schema — thesis, principles with examples, named voices with historical grounding, five interaction modes with behavioral directives, tone metadata, and hard boundaries. The structure forces rigor.
+| Your Action | What It Means |
+|------------|---------------|
+| Tap again within 30s | **Acted** — the signal resonated |
+| Tap again after 30s | **Delayed** — latent resonance, came back to it |
+| Switch voice | **Switched** — wrong lens, right moment |
+| Dismiss or session ends | **Dropped** — didn't land |
 
-**Composable.** Stack multiple worldfiles. The lens compiler merges their directives. This lets you build composite perspectives that don't exist in any single tradition.
+This builds a behavioral profile (aggregate counts only, no content) that shows on the **phone dashboard**:
 
-**Governed.** Every worldfile includes boundaries — what the lens *won't* do. Clinical referrals. Scope limits. Complementary traditions for when another worldview is more appropriate. Perspective without guardrails is just noise.
+```
+Stoic · 12 calls (~$0.012) · 23m
+72% led to action · you respond best to: pushback (80%) · clear advice (65%)
+```
 
-**Portable.** A worldfile is markdown. It doesn't depend on a specific model, provider, or platform. The same `stoicism.nv-world.md` works with Claude, GPT, or any future model. The philosophy travels.
+When governance adjusts the session:
 
-**Versionable.** Worldfiles have version numbers, world IDs, and structured metadata. You can track how a worldview evolves. You can diff philosophical changes. You can PR a new principle.
+```
+Stoic · 31 calls (~$0.031) · 8m
+68% led to action · you respond best to: pushback (80%)
+Adjusting — try fewer, slower taps.
+```
 
-### Write Your Own
+The AI also receives your behavioral patterns on the first tap of each session, so it can lean toward what works without silent optimization. You see the pattern. You decide what to do with it.
+
+---
+
+## Live Governance
+
+The governance engine isn't documentation — it runs in the app.
+
+After every AI response, `simulateWorld()` evaluates all 15 rules against session metrics. Trust decays on violations (rate limits, excessive dismissals, ambient misuse) and recovers on clean behavior (5+ clean calls or 20+ activations without violations).
+
+Gates determine behavior — the user never sees them:
+
+| Gate | Trust | What the User Feels |
+|------|-------|-------------------|
+| **ACTIVE** | >= 70 | Everything works. Full responses, full proactive. |
+| **DEGRADED** | >= 30 | Responses get shorter. Proactive gets quieter. App feels careful. |
+| **SUSPENDED** | > 10 | Proactive stops. On-demand still works but minimal. |
+| **REVOKED** | <= 10 | "Session needs a restart." All AI blocked. |
+
+Recovery is built in: sustained clean use boosts trust by 15%. Time-based cooldown boosts by 10%. A DEGRADED session can return to ACTIVE through normal use.
+
+---
+
+## Writing Your Own Worldfiles
 
 Create `src/worlds/your-philosophy.nv-world.md` with:
 
 1. **Thesis** — The core belief in 2-3 sentences
 2. **Principles** — Named concepts with `instruction`, `example_without`, `example_with`
 3. **Voices** — Historical or archetypal figures who embody the philosophy
-4. **Modes** — How the lens responds: direct, translate, reflect, challenge, teach
-5. **Boundaries** — When to stop. When to refer. What this lens is *not*.
+4. **Modes** — Five required: direct, translate, reflect, challenge, teach
+5. **Boundaries** — Clinical referral triggers and scope limits
 6. **Tone** — Formality, verbosity, emotion, confidence
 
-The validation engine (`npm run validate`) checks structure, required sections, and depth.
+The system prompt builder compiles the worldfile into a structured prompt with mode selection instructions, situation awareness, and constraints. The AI auto-selects the right mode for each moment. MODE tags are extracted from responses for behavioral tracking.
+
+A governance worldfile (`lenses-app.nv-world.md`) controls the app itself — invariants, state, rules, gates, assumption profiles. The governance engine evaluates every action. Guards check intents. The kernel blocks prompt injection and credential leaks. Roles define who can do what.
+
+See the existing worldfiles for examples. `npm run validate` checks everything.
 
 ---
 
@@ -203,14 +264,15 @@ The validation engine (`npm run validate`) checks structure, required sections, 
 
 ```
 src/
-  server.ts                    # MentraOS app server — sessions, AI calls, governance
-  demo.ts                      # Interactive terminal demo of the full system
-  validate.ts                  # Pre-deployment validation of all worlds + governance
+  server.ts                    # MentraOS app server — sessions, AI, governance, tracking
+  demo.ts                      # Terminal demo with canned responses
+  demo-live.ts                 # Live demo with real AI calls (BYO key)
+  validate.ts                  # Pre-deployment validation
   proactive.ts                 # Proactive perspective engine (opt-in)
   worlds/
-    philosophy-loader.ts       # Loads + validates + compiles .nv-world.md → system prompts
-    lenses-governance.ts       # Governance guards, kernel, roles, trust scoring
-    stoicism.nv-world.md       # Philosophy worldfiles (10 traditions)
+    philosophy-loader.ts       # Loads + validates + compiles .nv-world.md
+    lenses-governance.ts       # Guards, kernel, roles, intent vocabulary
+    stoicism.nv-world.md       # 10 philosophy worldfiles
     icf-coaching.nv-world.md
     accountability.nv-world.md
     mindfulness.nv-world.md
@@ -220,31 +282,12 @@ src/
     socratic-method.nv-world.md
     cbt.nv-world.md
     existentialism.nv-world.md
-    lenses-app.nv-world.md     # App governance worldfile (500+ lines)
+    lenses-app.nv-world.md     # App governance (560+ lines, 15 rules, 4 gates)
 
 mentra.app.json                # MentraOS app manifest
 app_config.json                # Settings UI schema
+Dockerfile                     # Production build (non-root, fails on errors)
 ```
-
----
-
-## Governance Without Ownership
-
-This is the thesis of NeuroverseOS worldfiles:
-
-**You don't need to own the model to govern it.**
-
-Lenses proves this with four mechanisms:
-
-1. **Prompt compilation** — Philosophy worldfiles compile into system prompt overlays. The AI doesn't know Stoicism. The worldfile *teaches it*, every time, in the context window. No fine-tuning. No training data. Just structured perspective injection.
-
-2. **Local guard evaluation** — All governance runs on the device before the API call. If a guard blocks an action, the data never leaves the phone. The AI provider sees nothing.
-
-3. **BYO-Key** — The user owns the AI relationship. NeuroverseOS provides the perspective and the governance. The user provides the model and pays the cost (~$0.001 per activation at Haiku rates).
-
-4. **Session trust scoring** — A real-time trust score decays on violations and improves on clean behavior. Gates (ACTIVE/DEGRADED/SUSPENDED/REVOKED) restrict functionality based on trust. No human review needed — the governance is algorithmic and immediate.
-
-The result: a governed AI companion where **the user owns everything** — their data, their API key, their governance rules, their perspective — and NeuroverseOS owns nothing except the philosophy and the enforcement layer.
 
 ---
 
@@ -254,8 +297,20 @@ The result: a governed AI companion where **the user owns everything** — their
 # Install dependencies
 npm install
 
-# Run the interactive demo (no glasses or API key needed)
+# Run the terminal demo (no glasses or API key needed)
 npm run demo
+
+# Live demo with real AI calls
+ANTHROPIC_API_KEY=sk-ant-... npm run demo:live
+
+# Compare Claude vs GPT through the same worldfile
+ANTHROPIC_API_KEY=sk-ant-... OPENAI_API_KEY=sk-... npm run demo:live
+
+# Interactive mode — type anything, switch voices, compare
+ANTHROPIC_API_KEY=sk-ant-... npm run demo:live -- --interactive
+
+# Local mode — see compiled system prompts without API calls
+npm run demo:live -- --local
 
 # Validate all worlds and governance
 npm run validate
@@ -277,7 +332,8 @@ npm run dev
 ### Requirements
 
 - Node.js >= 20
-- MentraOS SDK
+- [MentraOS SDK](https://github.com/Mentra-Community/MentraOS) (`@mentra/sdk`)
+- [NeuroverseOS Governance](https://github.com/NeuroverseOS/Neuroverseos-governance) (`@neuroverseos/governance`)
 - Your own API key (Anthropic or OpenAI)
 
 ---
@@ -288,6 +344,8 @@ These are structural, immutable, and cannot be disabled:
 
 | Invariant | Guarantee |
 |-----------|-----------|
+| `perspective_only` | **Every response reframes through philosophy. Never detects or classifies behavioral signals.** |
+| `no_signal_detection` | **No deception analysis, no confidence scores, no signal labels. Lenses sees through a lens, not a microscope.** |
 | `byo_key_integrity` | Your API key is never logged, transmitted, or shared |
 | `no_hidden_data_flow` | Every data send corresponds to a user action |
 | `user_controls_activation` | No listening without explicit activation |
@@ -296,16 +354,31 @@ These are structural, immutable, and cannot be disabled:
 | `ambient_bystander_disclosure` | User must acknowledge capturing nearby speech |
 | `ambient_identity_separation` | No speaker labels, voiceprints, or identification |
 | `lens_transparency` | Active lens always visible to the user |
-| `phone_local_journal_only` | Only aggregate counts stored, on your phone, deletable |
 | `proactive_opt_in` | Proactive mode requires explicit opt-in, off by default |
 
 This is not aspirational governance. This is the governance engine we built, running on the app we built, enforced every time the AI speaks.
 
 ---
 
+## Part of the NeuroverseOS Family
+
+```
+NeuroverseOS/
+  neuroverseos-governance    npm package — the governance engine
+  lenses                     app — philosophy-powered perspectives (this repo)
+  startalk                   app — astrology-powered communication
+  negotiator                 app — real-time negotiation signals
+```
+
+All three apps share the same governance architecture: worldfiles, guards, kernel, session trust, behavioral tracking. Same engine, different surfaces.
+
+---
+
 ## License
 
-See [LICENSE](LICENSE) for details.
+Licensed under the [Apache License, Version 2.0](LICENSE).
+
+Copyright 2026 NeuroverseOS.
 
 ## Author
 

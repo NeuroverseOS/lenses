@@ -1,0 +1,51 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    name: Test (governance logic)
+    runs-on: ubuntu-latest
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # governance.ts has zero external dependencies.
+      # Install vitest in isolation — don't resolve app dependencies
+      # which require @mentra/sdk (internal, not on public npm).
+      - name: Install test runner
+        run: |
+          mkdir -p /tmp/test-runner
+          cd /tmp/test-runner
+          npm init -y > /dev/null 2>&1
+          npm install vitest > /dev/null 2>&1
+
+      - name: Test
+        run: /tmp/test-runner/node_modules/.bin/vitest run
+
+  # Typecheck and Docker build require @mentra/sdk and @neuroverseos/governance.
+  # Uncomment when CI has access to internal registries.
+  #
+  # typecheck:
+  #   name: Typecheck
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - uses: actions/setup-node@v4
+  #       with:
+  #         node-version: 20
+  #     - run: npm ci
+  #     - run: npx tsc --noEmit
+  #
+  # docker:
+  #   name: Docker build
+  #   runs-on: ubuntu-latest
+  #   steps:
+  #     - uses: actions/checkout@v4
+  #     - run: docker build .
