@@ -16,14 +16,18 @@ jobs:
         with:
           node-version: 20
 
-      # Install only vitest — governance.ts has zero external dependencies.
-      # Full npm ci requires @mentra/sdk (internal package, not on public npm).
-      # When Mentra registry access is available, replace this with npm ci.
+      # governance.ts has zero external dependencies.
+      # Install vitest in isolation — don't resolve app dependencies
+      # which require @mentra/sdk (internal, not on public npm).
       - name: Install test runner
-        run: npm install --no-save vitest
+        run: |
+          mkdir -p /tmp/test-runner
+          cd /tmp/test-runner
+          npm init -y > /dev/null 2>&1
+          npm install vitest > /dev/null 2>&1
 
       - name: Test
-        run: npx vitest run
+        run: /tmp/test-runner/node_modules/.bin/vitest run
 
   # Typecheck and Docker build require @mentra/sdk and @neuroverseos/governance.
   # Uncomment when CI has access to internal registries.
