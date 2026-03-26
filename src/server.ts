@@ -533,7 +533,7 @@ async function saveJournal(session: AppSession, journal: LensJournal): Promise<v
   } catch (err) {
     console.warn('[Lenses] Failed to persist journal:', err instanceof Error ? err.message : err);
   }
-  const summary = `${journal.totalLenses} lenses | ${journal.currentStreakDays}d streak`;
+  const summary = `${journal.totalSignals} signals | ${journal.currentStreakDays}d streak`;
   session.dashboard.content.writeToMain(summary);
 }
 
