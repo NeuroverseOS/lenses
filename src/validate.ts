@@ -6,17 +6,18 @@
  * evaluation pipeline works. Run before deploying.
  *
  * Run:
- *   npx tsx apps/lenses/src/validate.ts
+ *   npm run validate
  */
 
 import {
   MentraGovernedExecutor,
   DEFAULT_USER_RULES,
-} from '../../../src/adapters/mentraos';
-import type { AppContext } from '../../../src/adapters/mentraos';
-import { parseWorldMarkdown } from '../../../src/engine/bootstrap-parser';
-import { emitWorldDefinition } from '../../../src/engine/bootstrap-emitter';
-import { getLenses, compileLensOverlay } from '../../../src/builder/lens';
+  parseWorldMarkdown,
+  emitWorldDefinition,
+  getLenses,
+  compileLensOverlay,
+} from '@neuroverseos/governance';
+import type { AppContext } from '@neuroverseos/governance';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -59,7 +60,8 @@ console.log(`${D}Platform world:${R}`);
 let platformWorld: ReturnType<typeof emitWorldDefinition>['world'] | null = null;
 
 check('Platform world (mentraos-smartglasses) loads', () => {
-  const path = resolve(__dirname, '../../../src/worlds/mentraos-smartglasses.nv-world.md');
+  // Platform world ships with @neuroverseos/governance package
+  const path = resolve(dirname(require.resolve('@neuroverseos/governance')), 'worlds/mentraos-smartglasses.nv-world.md');
   const md = readFileSync(path, 'utf-8');
   const parsed = parseWorldMarkdown(md);
   if (parsed.issues.some(i => i.severity === 'error')) return false;

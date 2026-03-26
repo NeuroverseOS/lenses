@@ -36,8 +36,10 @@ import type { AppSession, ButtonPress, TranscriptionData } from '@mentra/sdk';
 import {
   MentraGovernedExecutor,
   DEFAULT_USER_RULES,
-} from '../../../src/adapters/mentraos';
-import type { AppContext, UserRules } from '../../../src/adapters/mentraos';
+  parseWorldMarkdown,
+  emitWorldDefinition,
+} from '@neuroverseos/governance';
+import type { AppContext, UserRules } from '@neuroverseos/governance';
 
 import {
   VOICES,
@@ -56,8 +58,6 @@ import {
 } from './proactive';
 
 import { loadLensesGovernedWorld } from './worlds/lenses-governance';
-import { parseWorldMarkdown } from '../../../src/engine/bootstrap-parser';
-import { emitWorldDefinition } from '../../../src/engine/bootstrap-emitter';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -182,7 +182,8 @@ async function callUserAI(
 // ─── Governance Setup ────────────────────────────────────────────────────────
 
 function loadPlatformWorld() {
-  const worldPath = resolve(__dirname, '../../../src/worlds/mentraos-smartglasses.nv-world.md');
+  // Platform world ships with @neuroverseos/governance package
+  const worldPath = resolve(dirname(require.resolve('@neuroverseos/governance')), 'worlds/mentraos-smartglasses.nv-world.md');
   const worldMd = readFileSync(worldPath, 'utf-8');
   const parseResult = parseWorldMarkdown(worldMd);
 
@@ -355,6 +356,23 @@ function writeJournalToDashboard(session: AppSession, journal: LensJournal): voi
 }
 
 /**
+ * Update the dashboard with live session metrics.
+ * Lets the user check their streak, call count, and voice mid-session.
+ */
+function updateDashboardMetrics(s: LensSession): void {
+  const duration = Math.round((Date.now() - s.metrics.sessionStart) / 60000);
+  const parts: string[] = [
+    `${s.voice.name}`,
+    `${s.metrics.aiCalls} calls`,
+  ];
+  if (s.metrics.ambientSends > 0) parts.push(`${s.metrics.ambientSends} ambient`);
+  if (s.metrics.proactiveInsights > 0) parts.push(`${s.metrics.proactiveInsights} proactive`);
+  if (s.journal.currentStreakDays > 1) parts.push(`${s.journal.currentStreakDays}d streak`);
+  if (duration > 0) parts.push(`${duration}m`);
+  s.appSession.dashboard.content.writeToMain(parts.join(' · '));
+}
+
+/**
  * Build a journal context string for the AI's daily intention.
  * Gives the voice knowledge of the user's recent patterns.
  */
@@ -517,7 +535,7 @@ class LensesApp extends AppServer {
 
     // ── Load journal from phone ────────────────────────────────────────────
 
-    const journal = loadJournal(settings);
+    const journal = loadJournal(session.settings as unknown as Record<string, unknown> | null);
     // Proactive defaults to OFF — user must explicitly opt in (governance: proactive_opt_in)
     const proactiveFreq = session.settings.get<string>('proactive_frequency', 'off') as ProactiveFrequency;
 
@@ -988,7 +1006,12 @@ class LensesApp extends AppServer {
           // Governance check: can we display?
           const displayCheck = s.executor.evaluate('display_text_wall', s.appContext);
           if (displayCheck.allowed) {
-            session.layouts.showTextWall(response.text);
+            // UX: Proactive responses are visually distinct — user must know
+            // the AI spoke up on its own vs being asked. Trust depends on this.
+            session.layouts.showDoubleTextWall(
+              `${s.voice.name} · unprompted`,
+              response.text,
+            );
           }
 
           // Record for deduplication
@@ -1115,7 +1138,11 @@ class LensesApp extends AppServer {
         // Governance check: can we display?
         const displayCheck = s.executor.evaluate('display_text_wall', s.appContext);
         if (displayCheck.allowed) {
-          session.layouts.showTextWall(response.text);
+          // UX: Always show active voice name so user never forgets which lens they're on
+          session.layouts.showDoubleTextWall(
+            `${s.voice.name}`,
+            response.text,
+          );
         }
 
         // Update conversation history (keep last 3 exchanges)
@@ -1126,6 +1153,9 @@ class LensesApp extends AppServer {
         if (s.conversationHistory.length > 6) {
           s.conversationHistory = s.conversationHistory.slice(-6);
         }
+
+        // UX: Update dashboard with mid-session metrics so user can check anytime
+        updateDashboardMetrics(s);
       }
     } catch (err) {
       s.metrics.aiFailures++;

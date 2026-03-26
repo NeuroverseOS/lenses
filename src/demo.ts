@@ -13,7 +13,7 @@
  *   5. Zero-cost architecture (lens = prompt injection, not a service)
  *
  * Run:
- *   npx tsx apps/lenses/src/demo.ts
+ *   npm run demo
  */
 
 import {
@@ -29,16 +29,12 @@ import {
   compileLensOverlay,
   getLenses,
   type Lens,
-} from '../../../src/builder/lens';
-
-import {
   MentraGovernedExecutor,
   DEFAULT_USER_RULES,
-} from '../../../src/adapters/mentraos';
-import type { AppContext } from '../../../src/adapters/mentraos';
-
-import { parseWorldMarkdown } from '../../../src/engine/bootstrap-parser';
-import { emitWorldDefinition } from '../../../src/engine/bootstrap-emitter';
+  parseWorldMarkdown,
+  emitWorldDefinition,
+} from '@neuroverseos/governance';
+import type { AppContext } from '@neuroverseos/governance';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -119,7 +115,8 @@ const RESPONSES: Record<string, Record<string, string>> = {
 
 // ─── Load Governance ─────────────────────────────────────────────────────────
 
-const platformWorldPath = resolve(__dirname, '../../../src/worlds/mentraos-smartglasses.nv-world.md');
+// Platform world ships with @neuroverseos/governance package
+const platformWorldPath = resolve(dirname(require.resolve('@neuroverseos/governance')), 'worlds/mentraos-smartglasses.nv-world.md');
 const platformWorldMd = readFileSync(platformWorldPath, 'utf-8');
 const platformParsed = parseWorldMarkdown(platformWorldMd);
 if (!platformParsed.world || platformParsed.issues.some(i => i.severity === 'error')) {
