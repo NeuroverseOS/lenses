@@ -5,9 +5,10 @@
   "description": "Lenses — Pick who you want in your corner. A governed AI companion for MentraOS smart glasses.",
   "type": "module",
   "scripts": {
-    "start": "node dist/server.js",
+    "start": "tsx src/server.ts",
     "dev": "tsx watch src/server.ts",
     "build": "tsc && cp src/worlds/*.nv-world.md dist/worlds/",
+    "postinstall": "node -e \"const f='node_modules/@neuroverseos/governance/package.json';const p=JSON.parse(require('fs').readFileSync(f));delete p.exports;require('fs').writeFileSync(f,JSON.stringify(p,null,2))\"",
     "demo": "tsx src/demo.ts",
     "demo:live": "tsx src/demo-live.ts",
     "validate": "tsx src/validate.ts",
