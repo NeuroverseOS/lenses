@@ -1,5 +1,8 @@
 FROM node:20-slim AS builder
 
+# neuroverseos-governance is a GitHub dependency — npm needs git to clone it
+RUN apt-get update && apt-get install -y git && rm -rf /var/lib/apt/lists/*
+
 WORKDIR /app
 
 COPY package.json package-lock.json* ./
