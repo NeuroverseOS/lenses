@@ -36,7 +36,7 @@ import {
   ADVANCED_WORLDS,
   loadPhilosophyWorld,
   buildSystemPrompt,
-} from './worlds/philosophy-loader';
+} from './worlds/philosophy-loader.js';
 
 import * as readline from 'readline';
 

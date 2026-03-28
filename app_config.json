@@ -26,7 +26,7 @@
     },
     {
       "key": "ai_api_key",
-      "type": "secret",
+      "type": "text",
       "label": "API Key",
       "defaultValue": "",
       "description": "Your API key for Claude or GPT. Your key, your cost, your data. We never store or see it."

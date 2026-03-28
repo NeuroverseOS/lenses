@@ -25,8 +25,8 @@
  *   - Don't repeat the same insight twice
  */
 
-import type { PhilosophyWorld, Voice } from './worlds/philosophy-loader';
-import { buildSystemPrompt } from './worlds/philosophy-loader';
+import type { PhilosophyWorld, Voice } from './worlds/philosophy-loader.js';
+import { buildSystemPrompt } from './worlds/philosophy-loader.js';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 

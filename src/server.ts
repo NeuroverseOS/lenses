@@ -50,15 +50,15 @@ import {
   type PhilosophyWorld,
   type Voice,
   type VoiceId,
-} from './worlds/philosophy-loader';
+} from './worlds/philosophy-loader.js';
 
 import {
   ProactiveEngine,
   type ProactiveFrequency,
   type ProactiveClassification,
-} from './proactive';
+} from './proactive.js';
 
-import { loadLensesGovernedWorld } from './worlds/lenses-governance';
+import { loadLensesGovernedWorld } from './worlds/lenses-governance.js';
 import { readFileSync } from 'fs';
 import { resolve, dirname } from 'path';
 import { fileURLToPath } from 'url';
@@ -1690,15 +1690,57 @@ class LensesApp extends AppServer {
   }
 }
 
-// ─── Health Check + Start ────────────────────────────────────────────────────
+// ─── Start + Bun HTTP Server ─────────────────────────────────────────────────
+
+const port = Number(process.env.PORT) || 3002;
 
 const app = new LensesApp({
   packageName: APP_ID,
   apiKey: process.env.MENTRA_APP_API_KEY ?? '',
-  port: Number(process.env.PORT) || 3000,
+  port,
 });
 
-app.start();
-console.log(`[Lenses] App server running on port ${Number(process.env.PORT) || 3000}`);
+// SDK start() validates the API key but does NOT start an HTTP server.
+// Bun.serve() binds to 0.0.0.0 so Railway's proxy can reach us.
+await app.start();
+
+// Add /webview route — MentraOS loads this when user taps the app on their phone
+app.get('/webview', (c: any) => {
+  return c.html(`<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Lenses</title>
+  <style>
+    body { font-family: -apple-system, system-ui, sans-serif; margin: 0; padding: 24px; background: #0a0a0a; color: #e0e0e0; }
+    h1 { font-size: 20px; margin: 0 0 8px; }
+    p { font-size: 14px; color: #888; margin: 0 0 16px; line-height: 1.5; }
+    .voice { padding: 12px; border: 1px solid #222; border-radius: 8px; margin-bottom: 8px; }
+    .voice-name { font-weight: 600; font-size: 15px; }
+    .voice-tagline { font-size: 13px; color: #666; margin-top: 2px; }
+  </style>
+</head>
+<body>
+  <h1>Lenses</h1>
+  <p>Pick who you want in your corner. Tap your glasses to get a perspective.</p>
+  <p>Switch voices in Settings. Say "help" on your glasses for commands.</p>
+  <div class="voice"><div class="voice-name">Stoic</div><div class="voice-tagline">Focus on what you can control.</div></div>
+  <div class="voice"><div class="voice-name">Coach</div><div class="voice-tagline">What do you really want here?</div></div>
+  <div class="voice"><div class="voice-name">NFL Coach</div><div class="voice-tagline">No excuses. Execute.</div></div>
+  <div class="voice"><div class="voice-name">Monk</div><div class="voice-tagline">One thing at a time.</div></div>
+  <div class="voice"><div class="voice-name">Hype Man</div><div class="voice-tagline">You just did that.</div></div>
+  <div class="voice"><div class="voice-name">Closer</div><div class="voice-tagline">Here's the play.</div></div>
+</body>
+</html>`);
+});
+
+Bun.serve({
+  port,
+  hostname: '0.0.0.0',
+  fetch: app.fetch,
+});
+
+console.log(`[Lenses] App server running on port ${port}`);
 console.log(`[Lenses] Voices: ${VOICES.map(v => v.name).join(', ')}`);
 console.log(`[Lenses] Governance: platform world loaded, app world ${loadAppWorld() ? 'loaded' : 'skipped'}`);
